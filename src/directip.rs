@@ -9,14 +9,15 @@
 //! This module provides a `Server` structure, which can be created to run
 //! forever and receive those incoming MO messages.
 
+use log::{debug, error, info, warn};
 use std::{
-    io,
+    fs,
+    io::{self, Cursor, Read},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
-
-use log::{debug, error, info, warn};
 
 use crate::{mo::Message, storage::Storage};
 
@@ -116,41 +117,61 @@ where
     }
 }
 
-/// Handles an incoming `DirectIP` stream.
-fn handle_stream(stream: TcpStream, storage: Arc<Mutex<dyn Storage>>) {
-    match stream.peer_addr() {
-        Ok(addr) => {
-            debug!("Handling TcpStream from {}", addr);
-        }
-        Err(err) => {
-            warn!(
-                "Problem when extracting peer address from TcpStream, but we'll press on: {:?}",
-                err
-            );
-        }
+fn handle_stream(mut stream: TcpStream, storage: Arc<Mutex<dyn Storage>>) {
+    let peer = stream.peer_addr().ok();
+
+    // (1) Read the whole DirectIP message. For MO, Iridium closes after one message.
+    // Add a read timeout if you like:
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
+
+    let mut buf = Vec::new();
+    if let Err(err) = stream.read_to_end(&mut buf) {
+        error!("Error reading DirectIP stream: {:?}", err);
+        return;
     }
-    let message = match Message::read_from(stream) {
-        Ok(message) => {
+
+    // (2) Save raw bytes for testcases.
+    // Put IMEI in the filename later (after parse); for now, use a timestamp.
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let fname = format!("captures/{}-{:?}.mo.sbd", ts, peer);
+    if let Err(err) = fs::create_dir_all("captures").and_then(|_| fs::write(&fname, &buf)) {
+        warn!("Could not save DirectIP capture to {}: {:?}", fname, err);
+    } else {
+        debug!("Saved DirectIP capture to {}", fname);
+    }
+
+    // (3) Parse from a Cursor over the saved bytes.
+    let mut cur = Cursor::new(&buf);
+    let message = match Message::read_from(&mut cur) {
+        Ok(msg) => {
             info!(
-                "Received message from IMEI {} with MOMN {} and {} byte payload",
-                message.imei(),
-                message.momsn(),
-                message.payload().len(),
+                "Received message from IMEI {} with MOMSN {} and {} byte payload",
+                msg.imei(),
+                msg.momsn(),
+                msg.payload().len(),
             );
-            message
+            // Optional: rename the file to include IMEI now that we know it
+            let new_name = format!("captures/{}-{}-{}.mo.sbd", ts, msg.imei(), msg.momsn());
+            if let Err(e) = fs::rename(&fname, &new_name) {
+                debug!("Rename {} -> {} failed: {:?}", fname, new_name, e);
+            }
+            msg
         }
         Err(err) => {
             error!("Error when reading message: {:?}", err);
+            // keep the saved .sbd file for debugging
             return;
         }
     };
-    match storage
-        .lock()
-        .expect("unable to lock storage mutex")
-        .store(message)
-    {
-        Ok(_) => info!("Stored message"),
-        Err(err) => error!("Problem storing message: {:?}", err),
+
+    // (4) Store via your Storage backend.
+    if let Err(err) = storage.lock().expect("lock").store(message) {
+        error!("Problem storing message: {:?}", err);
+    } else {
+        info!("Stored message");
     }
 }
 
