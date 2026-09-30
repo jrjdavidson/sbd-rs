@@ -117,9 +117,11 @@ impl Message {
                 ie => information_elements.push(ie),
             }
         }
+        let header = header.ok_or(Error::NoHeader)?;
+        let payload = payload.ok_or(Error::NoPayload(header))?;
         Ok(Message {
-            header: header.ok_or(Error::NoHeader)?,
-            payload: payload.ok_or(Error::NoPayload)?,
+            header,
+            payload,
             information_elements,
         })
     }
@@ -336,7 +338,10 @@ mod tests {
     #[test]
     fn no_payload() {
         let header = header();
-        assert!(Message::new(vec![header.into()]).is_err());
+        match Message::new(vec![header.into()]) {
+            Err(Error::NoPayload(h)) => assert_eq!(header, h),
+            other => panic!("expected NoPayload, got {:?}", other),
+        }
     }
 
     #[test]

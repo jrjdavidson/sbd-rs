@@ -40,8 +40,19 @@ pub enum Error {
     NotADirectory(PathBuf),
 
     /// There is no payload in the message.
-    #[error("no payload")]
-    NoPayload,
+    ///
+    /// Carries the message header so the sending device can be identified. Note that Iridium
+    /// sends MO messages without a payload for sessions with an empty MO buffer (e.g. a mailbox
+    /// check).
+    #[error(
+        "no payload in message from IMEI {} (MOMSN {}, MTMSN {}, session status {:?}, time of session {})",
+        String::from_utf8_lossy(&.0.imei),
+        .0.momsn,
+        .0.mtmsn,
+        .0.session_status,
+        .0.time_of_session
+    )]
+    NoPayload(Header),
 
     /// The payload is too long.
     #[error("the payload is too long at {0} bytes")]

@@ -10,7 +10,7 @@
 //! forever and receive those incoming MO messages.
 
 use std::{
-    io,
+    io::{self, Read},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     thread,
@@ -118,40 +118,83 @@ where
 
 /// Handles an incoming `DirectIP` stream.
 fn handle_stream(stream: TcpStream, storage: Arc<Mutex<dyn Storage>>) {
-    match stream.peer_addr() {
+    let peer = match stream.peer_addr() {
         Ok(addr) => {
             debug!("Handling TcpStream from {}", addr);
+            addr.to_string()
         }
         Err(err) => {
             warn!(
                 "Problem when extracting peer address from TcpStream, but we'll press on: {:?}",
                 err
             );
+            "unknown peer".to_string()
         }
-    }
-    let message = match Message::read_from(stream) {
+    };
+    let mut reader = RecordingReader::new(stream);
+    let message = match Message::read_from(&mut reader) {
         Ok(message) => {
             info!(
-                "Received message from IMEI {} with MOMN {} and {} byte payload",
+                "Received message from IMEI {} with MOMSN {}, session status {:?} and {} byte payload",
                 message.imei(),
                 message.momsn(),
+                message.session_status(),
                 message.payload().len(),
             );
             message
         }
         Err(err) => {
-            error!("Error when reading message: {:?}", err);
+            error!(
+                "Error when reading message from {}: {} ({:?}); {} bytes received: {}",
+                peer,
+                err,
+                err,
+                reader.bytes.len(),
+                hex(&reader.bytes),
+            );
             return;
         }
     };
+    let imei = message.imei().to_string();
+    let momsn = message.momsn();
     match storage
         .lock()
         .expect("unable to lock storage mutex")
         .store(message)
     {
-        Ok(_) => info!("Stored message"),
-        Err(err) => error!("Problem storing message: {:?}", err),
+        Ok(_) => info!("Stored message from IMEI {} with MOMSN {}", imei, momsn),
+        Err(err) => error!(
+            "Problem storing message from IMEI {} with MOMSN {}: {:?}",
+            imei, momsn, err
+        ),
     }
+}
+
+/// A reader that keeps a copy of every byte read, so failed messages can be logged.
+struct RecordingReader<R> {
+    inner: R,
+    bytes: Vec<u8>,
+}
+
+impl<R> RecordingReader<R> {
+    fn new(inner: R) -> RecordingReader<R> {
+        RecordingReader {
+            inner,
+            bytes: Vec::new(),
+        }
+    }
+}
+
+impl<R: Read> Read for RecordingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Handles an error when handling a connection.
